@@ -24,7 +24,7 @@ services:
     build: ./frontend
     image: ${DOCKERHUB_USER:-youruser}/wanderlust-frontend:${IMAGE_TAG:-local}
     env_file:
-      - ./frontend/.env.sample
+      - ./frontend/.env.docker
     ports:
       - "5173:5173"
 
