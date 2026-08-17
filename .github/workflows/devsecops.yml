@@ -209,7 +209,12 @@ jobs:
             echo "One or more EC2 deploy secrets are missing (EC2_SSH_PRIVATE_KEY, EC2_HOST, EC2_USERNAME)."
             exit 1
           fi
-          echo "Deploying to ${SECRETS_EC2_HOST:=${{ secrets.EC2_HOST }}} as ${{ secrets.EC2_USERNAME }}"
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "Docker Hub secrets are missing (DOCKERHUB_USERNAME, DOCKERHUB_TOKEN)."
+            exit 1
+          fi
+          echo "Deploying to ${{ secrets.EC2_HOST }} as ${{ secrets.EC2_USERNAME }}"
+          echo "Images: ${{ secrets.DOCKERHUB_USERNAME }}/wanderlust-{backend,frontend}:${{ needs.build_and_push.outputs.image_tag }}"
 
       - name: Setup SSH key and known_hosts
         run: |
@@ -219,10 +224,15 @@ jobs:
           ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Copy deploy files to EC2
+        env:
+          IMAGE_TAG: ${{ needs.build_and_push.outputs.image_tag }}
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           APP_DIR="/home/${{ secrets.EC2_USERNAME }}/wanderlust"
           ssh -i ~/.ssh/id_rsa -p "${{ secrets.EC2_PORT || '22' }}" "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}" "mkdir -p '${APP_DIR}' '${APP_DIR}/backend' '${APP_DIR}/frontend' '${APP_DIR}/nginx' '${APP_DIR}/backend/data'"
+          printf 'DOCKERHUB_USER=%s\nIMAGE_TAG=%s\n' "$DOCKERHUB_USER" "$IMAGE_TAG" > .env.deploy
           scp -i ~/.ssh/id_rsa -P "${{ secrets.EC2_PORT || '22' }}" docker-compose.yml "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${APP_DIR}/"
+          scp -i ~/.ssh/id_rsa -P "${{ secrets.EC2_PORT || '22' }}" .env.deploy "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${APP_DIR}/.env"
           scp -i ~/.ssh/id_rsa -P "${{ secrets.EC2_PORT || '22' }}" backend/.env.docker "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${APP_DIR}/backend/.env.docker"
           scp -i ~/.ssh/id_rsa -P "${{ secrets.EC2_PORT || '22' }}" frontend/.env.docker "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${APP_DIR}/frontend/.env.docker"
           scp -i ~/.ssh/id_rsa -P "${{ secrets.EC2_PORT || '22' }}" nginx/default.conf "${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }}:${APP_DIR}/nginx/default.conf"
@@ -241,19 +251,62 @@ jobs:
           port: ${{ secrets.EC2_PORT || '22' }}
           envs: IMAGE_TAG,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,EC2_USERNAME
           script: |
+            set -euo pipefail
             cd /home/$EC2_USERNAME/wanderlust
+
             echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-            export DOCKERHUB_USER="$DOCKERHUB_USERNAME"
-            export IMAGE_TAG="$IMAGE_TAG"
+
+            printf 'DOCKERHUB_USER=%s\nIMAGE_TAG=%s\n' "$DOCKERHUB_USERNAME" "$IMAGE_TAG" > .env
+
+            echo "=== Deploy config ==="
+            cat .env
+            echo "Backend image:  ${DOCKERHUB_USERNAME}/wanderlust-backend:${IMAGE_TAG}"
+            echo "Frontend image: ${DOCKERHUB_USERNAME}/wanderlust-frontend:${IMAGE_TAG}"
+
             export COMPOSE_PROJECT_NAME=wanderlust
 
-            docker compose -f docker-compose.yml down --remove-orphans || true
+            docker compose --env-file .env -f docker-compose.yml down --remove-orphans || true
             for container in frontend backend nginx mongo redis; do
               docker rm -f "$container" 2>/dev/null || true
             done
 
-            docker compose -f docker-compose.yml pull
-            docker compose -f docker-compose.yml up -d --no-build --remove-orphans --force-recreate
+            # Ubuntu EC2 images ship with host nginx on port 80 — stop it before Docker nginx starts
+            for svc in nginx apache2 httpd; do
+              sudo systemctl stop "$svc" 2>/dev/null || true
+              sudo systemctl disable "$svc" 2>/dev/null || true
+            done
+            sudo pkill -9 nginx 2>/dev/null || true
+            sudo pkill -9 apache2 2>/dev/null || true
+
+            for port in 80 5000 5173; do
+              docker ps -q --filter "publish=${port}" | xargs -r docker rm -f 2>/dev/null || true
+              if command -v fuser >/dev/null 2>&1; then
+                sudo fuser -k "${port}/tcp" 2>/dev/null || true
+              fi
+            done
+            sleep 2
+
+            if ss -tln | grep -q ':80 '; then
+              echo "ERROR: Port 80 is still in use:"
+              sudo ss -tlnp | grep ':80 ' || true
+              exit 1
+            fi
+
+            docker compose --env-file .env -f docker-compose.yml pull backend frontend
+            docker compose --env-file .env -f docker-compose.yml up -d --no-build --pull always --remove-orphans --force-recreate
+
+            echo "=== Running containers ==="
+            docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+            if docker ps --format '{{.Image}}' | grep -E 'youruser/wanderlust|/wanderlust-(backend|frontend):local'; then
+              echo "ERROR: Placeholder images detected — check .env and Docker Hub credentials."
+              exit 1
+            fi
+
+            sleep 5
+            curl -fsS http://localhost/ >/dev/null
+            curl -fsS http://localhost/api/posts >/dev/null
+            echo "Deploy successful — app is responding on port 80."
 
   cd_owasp_zap:
     name: DAST - OWASP ZAP Baseline Scan

@@ -9,23 +9,23 @@ services:
 
   backend:
     container_name: backend
-    build: ./backend
-    image: ${DOCKERHUB_USER:-youruser}/wanderlust-backend:${IMAGE_TAG:-local}
+    image: ${DOCKERHUB_USER}/wanderlust-backend:${IMAGE_TAG}
     env_file:
       - ./backend/.env.docker
     ports:
       - "5000:5000"
     depends_on:
       - mongodb
+    restart: unless-stopped
 
   frontend:
     container_name: frontend
-    build: ./frontend
-    image: ${DOCKERHUB_USER:-youruser}/wanderlust-frontend:${IMAGE_TAG:-local}
+    image: ${DOCKERHUB_USER}/wanderlust-frontend:${IMAGE_TAG}
     env_file:
       - ./frontend/.env.docker
     ports:
       - "5173:5173"
+    restart: unless-stopped
 
   nginx:
     image: nginx:alpine
