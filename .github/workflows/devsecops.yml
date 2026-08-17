@@ -242,11 +242,18 @@ jobs:
           envs: IMAGE_TAG,DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,EC2_USERNAME
           script: |
             cd /home/$EC2_USERNAME/wanderlust
-            docker login -u "$DOCKERHUB_USERNAME" -p "$DOCKERHUB_TOKEN"
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
             export DOCKERHUB_USER="$DOCKERHUB_USERNAME"
             export IMAGE_TAG="$IMAGE_TAG"
-            docker compose -f docker-compose.yml pull || true
-            docker compose -f docker-compose.yml up -d --no-build
+            export COMPOSE_PROJECT_NAME=wanderlust
+
+            docker compose -f docker-compose.yml down --remove-orphans || true
+            for container in frontend backend nginx mongo redis; do
+              docker rm -f "$container" 2>/dev/null || true
+            done
+
+            docker compose -f docker-compose.yml pull
+            docker compose -f docker-compose.yml up -d --no-build --remove-orphans --force-recreate
 
   cd_owasp_zap:
     name: DAST - OWASP ZAP Baseline Scan
